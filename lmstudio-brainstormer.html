@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>LM Studio – Recursive QA Runner</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 text-gray-800">
+  <div class="w-[95%] mx-auto p-4 space-y-6">
+    <h1 class="text-3xl font-bold">Recursive QA Runner for LM Studio</h1>
+
+    <!-- Parameters -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div class="space-y-2 md:col-span-2">
+        <label class="block font-medium" for="systemPrompt">System Prompt</label>
+        <input id="systemPrompt" type="text" class="w-full rounded-lg border p-2" value="You are a helpful assistant.">
+      </div>
+
+      <div class="space-y-2 md:col-span-2">
+        <label class="block font-medium" for="startPrompt">Start Prompt</label>
+        <textarea id="startPrompt" class="w-full rounded-lg border p-2" rows="3" placeholder="Enter your first question…"></textarea>
+      </div>
+
+      <div class="space-y-2">
+        <label class="block font-medium" for="numQuestions">Follow‑up questions per answer</label>
+        <input id="numQuestions" type="number" class="w-full rounded-lg border p-2" value="3">
+      </div>
+
+      <div class="space-y-2">
+        <label class="block font-medium" for="iterations">Iterations</label>
+        <input id="iterations" type="number" class="w-full rounded-lg border p-2" value="5">
+      </div>
+
+      <div class="space-y-2">
+        <span class="block font-medium">Branching mode</span>
+        <label class="inline-flex items-center space-x-2">
+          <input type="radio" name="branch" value="single" checked>
+          <span>Single path</span>
+        </label>
+        <label class="inline-flex items-center space-x-2">
+          <input type="radio" name="branch" value="multi">
+          <span>Multi path</span>
+        </label>
+      </div>
+
+      <div class="space-y-2">
+        <label class="block font-medium" for="temp">Temperature</label>
+        <input id="temp" type="number" step="0.1" min="0" max="1" class="w-full rounded-lg border p-2" value="0.7">
+      </div>
+
+      <div class="space-y-2">
+        <label class="block font-medium" for="maxTokens">Max tokens (context window)</label>
+        <input id="maxTokens" type="number" class="w-full rounded-lg border p-2" value="4000">
+      </div>
+
+      <!-- Control buttons -->
+      <div class="md:col-span-2 flex flex-wrap items-center gap-3 mt-2">
+        <button id="startBtn"   class="px-4 py-2 bg-blue-600  text-white rounded-lg hover:bg-blue-700">Start</button>
+        <button id="pauseBtn"   class="px-4 py-2 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 disabled:opacity-40" disabled>Pause</button>
+        <button id="resumeBtn"  class="px-4 py-2 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 disabled:opacity-40" disabled>Resume</button>
+        <button id="stopBtn"    class="px-4 py-2 bg-red-600   text-white rounded-lg hover:bg-red-700 disabled:opacity-40" disabled>Stop</button>
+        <button id="downloadBtn"         class="px-4 py-2 bg-green-600  text-white rounded-lg hover:bg-green-700  disabled:opacity-40" disabled>Download JSON</button>
+        <button id="downloadSummaryBtn"  class="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-40" disabled>Download keywords</button>
+        <button id="downloadResumeBtn"   class="px-4 py-2 bg-teal-600  text-white rounded-lg hover:bg-teal-700  disabled:opacity-40" disabled>Download resume</button>
+      </div>
+    </div>
+
+    <!-- Progress bar -->
+    <div class="w-full bg-gray-200 rounded-full h-3 mt-4">
+      <div id="progressBar" class="bg-blue-600 h-3 rounded-full" style="width: 0%"></div>
+    </div>
+
+    <!-- Output areas -->
+    <h2 class="text-xl font-semibold mt-4">Conversation log</h2>
+    <pre id="output"   class="bg-white p-4 rounded-lg h-72 overflow-y-auto whitespace-pre-wrap"></pre>
+
+    <h2 class="text-xl font-semibold">Keyword summaries (every iteration)</h2>
+    <pre id="summary"  class="bg-white p-4 rounded-lg h-48 overflow-y-auto whitespace-pre-wrap"></pre>
+
+    <h2 class="text-xl font-semibold">Final resume</h2>
+    <pre id="resume"   class="bg-white p-4 rounded-lg h-48 overflow-y-auto whitespace-pre-wrap"></pre>
+  </div>
+
+<script>
+(async () => {
+  const MODEL_NAME = 'local-model';
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const approxTokens = txt => Math.ceil(txt.trim().split(/\s+/).length * 1.3);
+
+  // UI helpers
+  const $ = id => document.getElementById(id);
+  const startBtn   = $('startBtn');
+  const pauseBtn   = $('pauseBtn');
+  const resumeBtn  = $('resumeBtn');
+  const stopBtn    = $('stopBtn');
+  const downloadBtn        = $('downloadBtn');
+  const downloadSummaryBtn = $('downloadSummaryBtn');
+  const downloadResumeBtn  = $('downloadResumeBtn');
+  const outputEl   = $('output');
+  const summaryEl  = $('summary');
+  const resumeEl   = $('resume');
+  const progressBar = $('progressBar');
+
+  // State
+  let paused  = false;
+  let stopped = false;
+  let running = false;
+
+  let log = [];
+  let summaries = [];
+  let resumes = [];
+
+  // ---- LLM helpers ----
+  async function lmCall({ messages, temperature = 0.7, maxOutput = 512 }) {
+    const res = await fetch('http://localhost:1234/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: MODEL_NAME, messages, temperature, max_tokens: maxOutput, stream: false })
+    });
+    if (!res.ok) throw new Error('LM Studio API error: ' + res.status);
+    const data = await res.json();
+    return data.choices[0].message.content.trim();
+  }
+
+  const summariseContext = async (messages) => {
+    const text = messages.map(m => (m.role === 'user' ? 'U: ' : 'A: ') + m.content).join('\n');
+    const prompt = 'Please summarise the following conversation in at most 5 sentences.\n\n' + text;
+    const sum = await lmCall({ messages: [{ role: 'user', content: prompt }], temperature: 0.3, maxOutput: 150 });
+    return [{ role: 'system', content: 'Conversation so far (summary): ' + sum }];
+  };
+
+  const keywordSummary = async (answer) => {
+    const prompt = `Provide a concise bullet keyword list (single line) summarising the answer below.\n\n${answer}`;
+    return await lmCall({ messages: [{ role: 'user', content: prompt }], temperature: 0.3, maxOutput: 60 });
+  };
+
+  const resumeFromKeywords = async (text) => {
+    const prompt = 'Write a cohesive paragraph résumé based only on the following keyword list.\n\n' + text;
+    return await lmCall({ messages: [{ role: 'user', content: prompt }], temperature: 0.5, maxOutput: 200 });
+  };
+
+  const generateFollowUps = async (answer, count) => {
+    const prompt = `Generate ${count} refined follow‑up questions based on this answer. Provide them as a numbered list without explanations.\n\nAnswer:\n${answer}`;
+    const raw = await lmCall({ messages: [{ role: 'user', content: prompt }], maxOutput: 256 });
+    return raw.split(/\n+/).map(l => l.replace(/^\d+[.)]?\s*/, '').trim()).filter(Boolean);
+  };
+
+  // ----- Control helpers -----
+  const setControls = ({running=false, paused=false}) => {
+    startBtn.disabled   = running;
+    pauseBtn.disabled   = !running || paused;
+    resumeBtn.disabled  = !paused;
+    stopBtn.disabled    = !running;
+  };
+
+  pauseBtn.addEventListener('click', () => {
+    paused = true;
+    setControls({ running: true, paused: true });
+  });
+
+  resumeBtn.addEventListener('click', () => {
+    paused = false;
+    // refresh parameters for upcoming iterations
+    setControls({ running: true, paused: false });
+  });
+
+  stopBtn.addEventListener('click', () => {
+    stopped = true;
+  });
+
+  // Wait helper when paused
+  const waitIfPaused = async () => {
+    while (paused) await sleep(200);
+  };
+
+  // ------- Main runner -------
+  startBtn.addEventListener('click', async () => {
+    if (running) return;
+    running = true; paused = false; stopped = false;
+    setControls({ running: true, paused: false });
+
+    // init state
+    outputEl.textContent = '';
+    summaryEl.textContent = '';
+    resumeEl.textContent = '';
+    log = []; summaries = []; resumes = [];
+    downloadBtn.disabled = true; downloadSummaryBtn.disabled = true; downloadResumeBtn.disabled = true;
+    progressBar.style.width = '0%';
+
+    // read initial params
+    let params = getParams();
+    let queue = [params.startPrompt];
+    let messages = [{ role: 'system', content: params.systemPrompt }];
+
+    let iter = 0;
+    while (iter < params.iterations && !stopped) {
+      await waitIfPaused();
+      outputEl.textContent = `=== Iteration ${iter + 1}/${params.iterations} ===\n` + outputEl.textContent;
+
+      let nextQueue = [];
+      for (let idx = 0; idx < queue.length && !stopped; idx++) {
+        await waitIfPaused();
+        // refresh params on each question (so user edits during pause apply)
+        params = getParams();
+
+        const userQ = queue[idx];
+        messages.push({ role: 'user', content: userQ });
+        outputEl.textContent = `🧑‍💻 Q: ${userQ}\n` + outputEl.textContent;
+
+        const tokensUsed = messages.reduce((s, m) => s + approxTokens(m.content), 0);
+        if (tokensUsed > params.maxTokens) {
+          outputEl.textContent = '⚠️ Context too large – compressing…\n' + outputEl.textContent;
+          messages = [{ role: 'system', content: params.systemPrompt }, ...await summariseContext(messages)];
+        }
+
+        const answer = await lmCall({ messages, temperature: params.temperature });
+        messages.push({ role: 'assistant', content: answer });
+        outputEl.textContent = `🤖 A: ${answer}\n` + outputEl.textContent;
+
+        log.push({ iteration: iter + 1, question: userQ, answer, branch: idx });
+
+        const kw = await keywordSummary(answer);
+        summaries.push(kw);
+        summaryEl.textContent = kw + '\n' + summaryEl.textContent;
+        downloadSummaryBtn.disabled = false;
+
+        const followUps = await generateFollowUps(answer, params.numQuestions);
+        outputEl.textContent = `➡️ Follow‑ups: ${followUps.join(' | ')}\n` + outputEl.textContent;
+        log.push({ iteration: iter + 1, generated_followups: followUps, based_on: userQ });
+
+        if (params.branchMode === 'single') {
+          nextQueue.push(followUps[Math.floor(Math.random() * followUps.length)]);
+        } else {
+          nextQueue.push(...followUps);
+        }
+
+        progressBar.style.width = `${((iter + (idx + 1) / queue.length) / params.iterations) * 100}%`;
+      }
+
+      queue = nextQueue;
+      iter++;
+    }
+
+    // ------------ wrap up ------------
+    running = false;
+    setControls({ running: false, paused: false });
+    progressBar.style.width = '100%';
+    outputEl.textContent = (stopped ? '⏹️ Stopped early.\n' : '✅ Finished!\n') + outputEl.textContent;
+
+    // Build final résumé from keyword list
+    if (summaries.length) {
+      const maxTokens = getParams().maxTokens;
+      let chunk = '';
+      let chunks = [];
+      summaries.forEach(line => {
+        if (approxTokens(chunk + line) > maxTokens) {
+          chunks.push(chunk);
+          chunk = '';
+        }
+        chunk += line + '\n';
+      });
+      if (chunk.trim()) chunks.push(chunk);
+
+      for (const ch of chunks) {
+        const res = await resumeFromKeywords(ch.trim());
+        resumes.push(res);
+        resumeEl.textContent += res + '\n\n';
+      }
+      downloadResumeBtn.disabled = false;
+    }
+
+    downloadBtn.disabled = false;
+  });
+
+  // ------- parameter fetcher -------
+  function getParams() {
+    return {
+      systemPrompt: $('systemPrompt').value.trim(),
+      startPrompt: $('startPrompt').value.trim(),
+      numQuestions: +$('numQuestions').value || 3,
+      iterations: +$('iterations').value || 1,
+      temperature: +$('temp').value || 0.7,
+      maxTokens: +$('maxTokens').value || 4000,
+      branchMode: [...document.getElementsByName('branch')].find(r => r.checked).value
+    };
+  }
+
+  // ------- download buttons -------
+  downloadBtn.addEventListener('click', () => {
+    const blob = new Blob([JSON.stringify(log, null, 2)], { type: 'application/json' });
+    triggerDownload(blob, 'recursive_qa_log.json');
+  });
+
+  downloadSummaryBtn.addEventListener('click', () => {
+    const blob = new Blob([summaries.join('\n')], { type: 'text/plain' });
+    triggerDownload(blob, 'keyword_summaries.txt');
+  });
+
+  downloadResumeBtn.addEventListener('click', () => {
+    const blob = new Blob([resumes.join('\n\n')], { type: 'text/plain' });
+    triggerDownload(blob, 'resume.txt');
+  });
+
+  function triggerDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+})();
+</script>
+</body>
+</html>
