@@ -11,9 +11,8 @@ A **single‑file** web app (`lmstudio-brainstormer.html`) that turns your local
 <p align="center">
   <img src="screen.png" width="700" alt="Live screenshot"/>
 </p>
-https://youtu.be/GwUjzVHxPCI?si=nbXYx9g9g6ksoOx-
 
-<iframe width="560" height="315" src="https://www.youtube.com/embed/GwUjzVHxPCI?si=ML0IxT7ymkPTruOu" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+https://youtu.be/GwUjzVHxPCI?si=nbXYx9g9g6ksoOx-
 
 ---
 
